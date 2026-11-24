@@ -1,0 +1,789 @@
+openapi: 3.0.3
+info:
+  title: Student Discounts Map API
+  version: 1.0.0
+  description: ''
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Локальный сервер (Docker Compose)
+
+tags:
+  - name: Auth
+    description: Вход, регистрация и профиль
+  - name: Places
+    description: Карта, поиск и карточка места (доступно гостю)
+  - name: UGC
+    description: Добавление мест, скидок, фото, жалоб и «Мои заявки»
+  - name: Representative
+    description: Запрос роли представителя и предложение правок
+  - name: Moderation
+    description: Очередь модерации, решения, жалобы и журнал действий
+
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: session_id
+      description: Сессионная куки из Redis (HttpOnly, Secure, SameSite=Lax)
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: FORBIDDEN
+        message:
+          type: string
+          example: Недостаточно прав для выполнения действия
+
+    Coords:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+          example: 60.0074
+        lng:
+          type: number
+          minimum: -180
+          maximum: 180
+          example: 30.3728
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          nullable: true
+        vk_id:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [user, org_rep, moderator, admin]
+        status:
+          type: string
+          enum: [active, banned]
+        trust_score:
+          type: integer
+          example: 10
+
+    Discount:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: Скидка 15% на кофе
+        conditions:
+          type: string
+          example: По будням до 16:00 при показе студенческого
+        source:
+          type: string
+          enum: [user, org_rep, official]
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired]
+        valid_from:
+          type: string
+          format: date
+        valid_until:
+          type: string
+          format: date
+          nullable: true
+        rejection_reason:
+          type: string
+          nullable: true
+
+    PlaceShort:
+      type: object
+      description: Краткие данные точки для пинов на карте
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Кофейня у Политеха
+        category:
+          type: string
+          enum: [food, coffee, entertainment, clothing, education, sports, other]
+        address:
+          type: string
+          example: ул. Политехническая, 67
+        location:
+          $ref: '#/components/schemas/Coords'
+        discounts_count:
+          type: integer
+          example: 2
+        last_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    PlaceFull:
+      type: object
+      description: Полная карточка места
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        category:
+          type: string
+          enum: [food, coffee, entertainment, clothing, education, sports, other]
+        address:
+          type: string
+        location:
+          $ref: '#/components/schemas/Coords'
+        status:
+          type: string
+          enum: [pending, approved, rejected, archived]
+        photos:
+          type: array
+          description: Только проверенные фото (scan_status = clean)
+          items:
+            type: string
+            format: uri
+        discounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Discount'
+        last_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateDiscount:
+      type: object
+      required: [title, conditions, valid_from]
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 120
+        conditions:
+          type: string
+          minLength: 5
+          maxLength: 1000
+        valid_from:
+          type: string
+          format: date
+        valid_until:
+          type: string
+          format: date
+          nullable: true
+        media_ids:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+            format: uuid
+
+    CreatePlace:
+      type: object
+      required: [name, category, address, location]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        category:
+          type: string
+          enum: [food, coffee, entertainment, clothing, education, sports, other]
+        address:
+          type: string
+          minLength: 5
+          maxLength: 255
+        location:
+          $ref: '#/components/schemas/Coords'
+        media_ids:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            format: uuid
+        discount:
+          $ref: '#/components/schemas/CreateDiscount'
+
+    CreateReport:
+      type: object
+      required: [reason]
+      properties:
+        place_id:
+          type: string
+          format: uuid
+          nullable: true
+        discount_id:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+          enum: [place_closed, discount_expired, fake_info, duplicate, bad_media]
+        comment:
+          type: string
+          maxLength: 500
+          nullable: true
+
+    Submission:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [place, discount, change_request, org_rep_request]
+        title:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        rejection_reason:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    CreateChangeRequest:
+      type: object
+      required: [changes]
+      properties:
+        comment:
+          type: string
+          maxLength: 500
+        changes:
+          type: object
+          description: Поля карточки, которые представитель хочет обновить
+          properties:
+            name:
+              type: string
+            category:
+              type: string
+            address:
+              type: string
+            location:
+              $ref: '#/components/schemas/Coords'
+            media_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+
+    ModerationDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject]
+        rejection_reason:
+          type: string
+          maxLength: 500
+          description: Обязательно при отклонении (reject)
+
+    ReportResolve:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [archive_place, expire_discount, reject_report]
+        comment:
+          type: string
+          maxLength: 500
+
+    QueueItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [place, discount, change_request, org_rep_request, report]
+        status:
+          type: string
+        author_id:
+          type: string
+          format: uuid
+        author_trust_score:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          format: uuid
+        actor_role:
+          type: string
+        action:
+          type: string
+          example: PLACE_APPROVED
+        entity_type:
+          type: string
+        entity_id:
+          type: string
+          format: uuid
+        diff_snapshot:
+          type: object
+          additionalProperties: true
+          description: "Снимок изменений: было -> стало"
+        ip_address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: "Регистрация по email и паролю (лимит: 5/мин)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '409':
+          description: Conflict
+        '429':
+          description: Too Many Requests
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: "Вход по email и паролю (выдаёт session_id в cookie)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+        '429':
+          description: Too Many Requests
+
+  /auth/vk/start:
+    get:
+      tags: [Auth]
+      summary: Получить ссылку для входа через VK ID
+      responses:
+        '200':
+          description: OK (cсылка на авторизацию VK ID)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth_url:
+                    type: string
+                    format: uri
+
+  /auth/vk/callback:
+    post:
+      tags: [Auth]
+      summary: Завершить вход через VK ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state, device_id]
+              properties:
+                code:
+                  type: string
+                state:
+                  type: string
+                device_id:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized (ошибка проверки кода VK ID)
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Выход (удаляет сессию из Redis)
+      responses:
+        '204':
+          description: No Content
+
+  /users/me:
+    get:
+      tags: [Auth]
+      summary: Текущий пользователь и его роль
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+
+  /places:
+    get:
+      tags: [Places]
+      summary: Список одобренных мест для карты и поиска
+      parameters:
+        - name: bbox
+          in: query
+          description: Границы экрана карты "minLng,minLat,maxLng,maxLat"
+          schema:
+            type: string
+            example: "30.20,59.85,30.45,60.05"
+        - name: category
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Поиск по названию или адресу
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK (места на карте status = approved)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PlaceShort'
+
+    post:
+      tags: [UGC]
+      summary: "Предложить новое место (попадает в очередь модерации)"
+      description: "RBAC: авторизованный пользователь. Проверяет дубликаты по координатам."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlace'
+      responses:
+        '201':
+          description: Created (status = pending)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceFull'
+        '401':
+          description: Unauthorized 
+        '409':
+          description: Conflict
+        '429':
+          description: Too Many Requests
+
+  /places/{id}:
+    get:
+      tags: [Places]
+      summary: Карточка места со скидками и проверенными фото
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK (подробности места)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceFull'
+        '404':
+          description: Not Found
+
+  /places/{id}/discounts:
+    post:
+      tags: [UGC]
+      summary: Добавить скидку к месту (на модерацию)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDiscount'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Discount'
+        '401':
+          description: Unauthorized 
+
+  /media/upload:
+    post:
+      tags: [UGC]
+      summary: Загрузить фото
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Created (scan_status = pending)
+  /reports:
+    post:
+      tags: [UGC]
+      summary: Отправить жалобу на место или скидку (только авторизованные)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReport'
+      responses:
+        '201':
+          description: Created
+        '401':
+          description: Unauthorized
+        '429':
+          description: Too Many Requests
+
+  /users/me/submissions:
+    get:
+      tags: [UGC]
+      summary: Мои заявки и статусы их проверки
+      responses:
+        '200':
+          description: Список заявок текущего пользователя
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Submission'
+
+  /org-representatives/requests:
+    post:
+      tags: [Representative]
+      summary: Запросить роль представителя организации
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [place_id, proof_contact]
+              properties:
+                place_id:
+                  type: string
+                  format: uuid
+                proof_contact:
+                  type: string
+                  example: manager@coffee-polytech.ru
+      responses:
+        '201':
+          description: Created
+
+  /places/{id}/change-requests:
+    post:
+      tags: [Representative]
+      summary: Предложить изменение карточки места
+      description: "Только подтверждённый представитель этого места. Правки уходят модератору."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChangeRequest'
+      responses:
+        '201':
+          description: Created
+        '403':
+          description: Forbidden (не представитель организации)
+
+  /moderation/queue:
+    get:
+      tags: [Moderation]
+      summary: Очередь модерации (заявки, правки, жалобы)
+      description: "RBAC: moderator, admin"
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [place, discount, change_request, org_rep_request, report]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QueueItem'
+        '403':
+          description: Forbidden (только для модераторов)
+
+  /moderation/{type}/{id}/decision:
+    post:
+      tags: [Moderation]
+      summary: Одобрить или отклонить заявку
+      description: "RBAC: moderator, admin"
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [places, discounts, change-requests, org-representatives]
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerationDecision'
+      responses:
+        '200':
+          description: OK
+        '403':
+          description: Forbidden (только для модераторов)
+
+  /moderation/reports/{id}/resolve:
+    post:
+      tags: [Moderation]
+      summary: Рассмотреть жалобу пользователя
+      description: "RBAC: moderator, admin"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportResolve'
+      responses:
+        '200':
+          description: OK (жалоба закрыта)
+        '403':
+          description: Forbidden (только для модераторов)
+
+  /moderation/audit-logs:
+    get:
+      tags: [Moderation]
+      summary: Журнал действий модераторов и админов
+      description: "RBAC: moderator, admin"
+      parameters:
+        - name: entity_type
+          in: query
+          schema:
+            type: string
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK (история критических действий)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '403':
+          description: Forbidden (только для модераторов)
