@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,17 +15,20 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if err := run(logger); err != nil {
+		logger.Error("сервер завершился с ошибкой", "error", err)
+		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logger *slog.Logger) error {
 	cfg := config.Load()
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.NewRouter(),
+		Handler:           httpapi.NewRouter(logger),
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -37,7 +40,7 @@ func run() error {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("сервер запущен на %s", cfg.Addr)
+		logger.Info("сервер запущен", "addr", cfg.Addr)
 		serverErr <- server.ListenAndServe()
 	}()
 
@@ -57,6 +60,6 @@ func run() error {
 		return err
 	}
 
-	log.Println("сервер остановлен")
+	logger.Info("сервер остановлен")
 	return nil
 }
