@@ -1,19 +1,23 @@
 package httpapi
 
 import (
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 )
 
-func NewRouter() http.Handler {
+func NewRouter(logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	return mux
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(logger, w, http.StatusOK, `{"status":"ok"}`)
+	})
+	return logRequests(logger, recoverPanics(logger, mux))
 }
 
-func health(w http.ResponseWriter, _ *http.Request) {
+func writeJSON(logger *slog.Logger, w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
-		log.Printf("не удалось отправить ответ: %v", err)
+	w.WriteHeader(status)
+	if _, err := io.WriteString(w, body); err != nil {
+		logger.Error("не удалось отправить ответ", "error", err)
 	}
 }
